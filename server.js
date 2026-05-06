@@ -9,7 +9,17 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
 const rooms = {};
-const botNames = ["Bot_Joko", "Bot_Siti", "Bot_Budi", "Bot_Ayu", "ProPlayer99", "LuckyStrike"];
+const botNames = ["Bot_Joko", "Bot_Siti", "Bot_Budi", "ProPlayer99"];
+
+function generateCards() {
+    // Generate 4 random cards (0-6) for Domino QiuQiu
+    return [
+        [Math.floor(Math.random()*7), Math.floor(Math.random()*7)],
+        [Math.floor(Math.random()*7), Math.floor(Math.random()*7)],
+        [Math.floor(Math.random()*7), Math.floor(Math.random()*7)],
+        [Math.floor(Math.random()*7), Math.floor(Math.random()*7)]
+    ];
+}
 
 function createBot() {
     return {
@@ -17,7 +27,8 @@ function createBot() {
         username: botNames[Math.floor(Math.random() * botNames.length)],
         chips: Math.floor(Math.random() * 500) + 100 + "M",
         isBot: true,
-        cards: [Math.floor(Math.random()*6), Math.floor(Math.random()*6)] // Dummy cards
+        isFolded: false,
+        cards: generateCards()
     };
 }
 
@@ -25,12 +36,13 @@ const defaultRooms = ['QIUQIU_BEGINNER', 'QIUQIU_PRO', 'GAPLE_VIP'];
 defaultRooms.forEach(id => {
     rooms[id] = {
         id: id,
-        state: 'WAITING', 
+        state: 'WAITING', // WAITING, COUNTDOWN, PLAYING, FINISHED
         pot: 0,
         turnIndex: -1,
-        seats: [createBot(), null, createBot(), null, createBot(), null], // 6 Seats
+        seats: [createBot(), null, createBot(), null], // 4 Seats
         spectators: [],
-        winner: null
+        winner: null,
+        countdown: 0
     };
 });
 
@@ -38,29 +50,70 @@ defaultRooms.forEach(id => {
 setInterval(() => {
     Object.values(rooms).forEach(room => {
         const activePlayers = room.seats.filter(p => p !== null);
+        const playingPlayers = activePlayers.filter(p => !p.isFolded);
         
         if (room.state === 'WAITING' && activePlayers.length >= 2) {
-            room.state = 'PLAYING';
-            room.pot = activePlayers.length * 10;
-            room.winner = null;
-            
-            // Tentukan giliran pertama
-            let firstTurn = 0;
-            while(room.seats[firstTurn] === null) { firstTurn++; }
-            room.turnIndex = firstTurn;
-            
+            room.state = 'COUNTDOWN';
+            room.countdown = 10;
             io.to(room.id).emit('room_update', JSON.stringify(room));
-            io.to(room.id).emit('game_message', "Game Dimulai!");
-        } 
+            io.to(room.id).emit('game_message', "Game dimulai dalam 10 detik...");
+        }
+        else if (room.state === 'COUNTDOWN') {
+            room.countdown--;
+            if (room.countdown <= 0) {
+                room.state = 'PLAYING';
+                room.pot = activePlayers.length * 10; // Ante
+                room.winner = null;
+                
+                // Reset fold status & bagikan kartu baru
+                room.seats.forEach(seat => {
+                    if (seat) {
+                        seat.isFolded = false;
+                        seat.cards = generateCards();
+                    }
+                });
+                
+                let firstTurn = 0;
+                while(room.seats[firstTurn] === null || room.seats[firstTurn].isFolded) { firstTurn = (firstTurn + 1) % 4; }
+                room.turnIndex = firstTurn;
+                
+                io.to(room.id).emit('room_update', JSON.stringify(room));
+                io.to(room.id).emit('game_message', "Taruhan Dimulai!");
+            } else {
+                io.to(room.id).emit('room_update', JSON.stringify(room));
+            }
+        }
         else if (room.state === 'PLAYING') {
+            // Cek jika semua fold kecuali 1
+            if (playingPlayers.length === 1) {
+                room.state = 'FINISHED';
+                room.turnIndex = -1;
+                room.winner = playingPlayers[0].username;
+                io.to(room.id).emit('game_message', `${room.winner} Menang (Semua Fold) ${room.pot}M!`);
+                io.to(room.id).emit('room_update', JSON.stringify(room));
+                
+                setTimeout(() => {
+                    room.pot = 0;
+                    room.state = 'WAITING';
+                    room.winner = null;
+                    io.to(room.id).emit('room_update', JSON.stringify(room));
+                }, 5000);
+                return;
+            }
+
             const currentPlayer = room.seats[room.turnIndex];
             
-            if (currentPlayer && currentPlayer.isBot) {
-                const actions = ['CHECK', 'CALL', 'RAISE'];
-                const action = actions[Math.floor(Math.random() * actions.length)];
+            if (currentPlayer && currentPlayer.isBot && !currentPlayer.isFolded) {
+                const actions = ['CHECK', 'CALL', 'RAISE', 'FOLD'];
+                // Bot lebih jarang fold
+                const action = Math.random() > 0.85 ? 'FOLD' : actions[Math.floor(Math.random() * 3)];
                 const amount = action === 'RAISE' ? Math.floor(Math.random() * 20) + 5 : 0;
                 
-                if (action === 'RAISE' || action === 'CALL') room.pot += (amount || 5);
+                if (action === 'FOLD') {
+                    currentPlayer.isFolded = true;
+                } else if (action === 'RAISE' || action === 'CALL') {
+                    room.pot += (amount || 5);
+                }
 
                 io.to(room.id).emit('action_broadcast', JSON.stringify({
                     username: currentPlayer.username,
@@ -70,20 +123,20 @@ setInterval(() => {
                 
                 // Next turn
                 do {
-                    room.turnIndex = (room.turnIndex + 1) % 6;
-                } while (room.seats[room.turnIndex] === null);
+                    room.turnIndex = (room.turnIndex + 1) % 4;
+                } while (room.seats[room.turnIndex] === null || room.seats[room.turnIndex].isFolded);
                 
                 io.to(room.id).emit('room_update', JSON.stringify(room));
             }
 
-            // Cek Win Condition
-            if (room.pot > 200) {
+            // Cek Win Condition (Showdown)
+            if (room.pot > 150) {
                 room.state = 'FINISHED';
-                room.turnIndex = -1; // Hentikan giliran
-                const winner = activePlayers[Math.floor(Math.random() * activePlayers.length)];
+                room.turnIndex = -1;
+                const winner = playingPlayers[Math.floor(Math.random() * playingPlayers.length)];
                 room.winner = winner.username;
                 
-                io.to(room.id).emit('game_message', `${winner.username} Menang ${room.pot}M!`);
+                io.to(room.id).emit('game_message', `${winner.username} Menang Showdown ${room.pot}M!`);
                 io.to(room.id).emit('room_update', JSON.stringify(room));
                 
                 setTimeout(() => {
@@ -91,11 +144,11 @@ setInterval(() => {
                     room.state = 'WAITING';
                     room.winner = null;
                     io.to(room.id).emit('room_update', JSON.stringify(room));
-                }, 6000);
+                }, 5000);
             }
         }
     });
-}, 4000); // Diperlambat sedikit agar animasi UI terlihat
+}, 3000);
 
 io.on('connection', (socket) => {
     socket.on('join_room', (data) => {
@@ -106,7 +159,7 @@ io.on('connection', (socket) => {
             socket.username = username || `Guest_${Math.floor(Math.random()*1000)}`;
             
             if (!rooms[roomId]) {
-                rooms[roomId] = { id: roomId, state: 'WAITING', pot: 0, turnIndex: -1, seats: Array(6).fill(null), spectators: [], winner: null };
+                rooms[roomId] = { id: roomId, state: 'WAITING', pot: 0, turnIndex: -1, seats: Array(4).fill(null), spectators: [], winner: null, countdown: 0 };
             }
             
             rooms[roomId].spectators.push({ id: socket.id, username: socket.username });
@@ -119,19 +172,39 @@ io.on('connection', (socket) => {
             const { seatIndex, chips } = JSON.parse(data);
             const room = rooms[socket.roomId];
             
-            if (room && seatIndex >= 0 && seatIndex < 6 && room.seats[seatIndex] === null) {
+            if (room && seatIndex >= 0 && seatIndex < 4 && room.seats[seatIndex] === null) {
                 room.spectators = room.spectators.filter(p => p.id !== socket.id);
                 room.seats[seatIndex] = {
                     id: socket.id,
                     username: socket.username,
                     chips: chips,
                     isBot: false,
-                    cards: [Math.floor(Math.random()*6), Math.floor(Math.random()*6)]
+                    isFolded: false,
+                    cards: generateCards()
                 };
                 io.to(socket.roomId).emit('room_update', JSON.stringify(room));
-                io.to(socket.roomId).emit('game_message', `${socket.username} duduk.`);
             }
         } catch(e) {}
+    });
+
+    socket.on('stand_up', () => {
+        const room = rooms[socket.roomId];
+        if (room) {
+            for (let i = 0; i < 4; i++) {
+                if (room.seats[i] && room.seats[i].id === socket.id) {
+                    room.seats[i] = null;
+                    room.spectators.push({ id: socket.id, username: socket.username });
+                    
+                    // Jika giliran dia, pindah giliran
+                    if (room.turnIndex === i && room.state === 'PLAYING') {
+                        do { room.turnIndex = (room.turnIndex + 1) % 4; } 
+                        while (room.seats[room.turnIndex] === null || room.seats[room.turnIndex].isFolded);
+                    }
+                    break;
+                }
+            }
+            io.to(socket.roomId).emit('room_update', JSON.stringify(room));
+        }
     });
 
     socket.on('player_action', (data) => {
@@ -139,10 +212,14 @@ io.on('connection', (socket) => {
             const { action, amount } = JSON.parse(data);
             const room = rooms[socket.roomId];
             
-            // Validasi apakah benar gilirannya
             const currentPlayer = room.seats[room.turnIndex];
             if (room && room.state === 'PLAYING' && currentPlayer && currentPlayer.id === socket.id) {
-                if (action === 'RAISE' || action === 'CALL') room.pot += parseInt(amount || 0);
+                
+                if (action === 'FOLD') {
+                    currentPlayer.isFolded = true;
+                } else if (action === 'RAISE' || action === 'CALL') {
+                    room.pot += parseInt(amount || 0);
+                }
                 
                 io.to(socket.roomId).emit('action_broadcast', JSON.stringify({
                     username: socket.username,
@@ -150,7 +227,10 @@ io.on('connection', (socket) => {
                     amount: amount
                 }));
                 
-                do { room.turnIndex = (room.turnIndex + 1) % 6; } while (room.seats[room.turnIndex] === null);
+                // Pindah giliran ke pemain yang tidak null dan tidak fold
+                do { 
+                    room.turnIndex = (room.turnIndex + 1) % 4; 
+                } while (room.seats[room.turnIndex] === null || room.seats[room.turnIndex].isFolded);
                 
                 io.to(socket.roomId).emit('room_update', JSON.stringify(room));
             }
@@ -161,9 +241,13 @@ io.on('connection', (socket) => {
         const room = rooms[socket.roomId];
         if (room) {
             room.spectators = room.spectators.filter(p => p.id !== socket.id);
-            for (let i = 0; i < 6; i++) {
+            for (let i = 0; i < 4; i++) {
                 if (room.seats[i] && room.seats[i].id === socket.id) {
                     room.seats[i] = null;
+                    if (room.turnIndex === i && room.state === 'PLAYING') {
+                        do { room.turnIndex = (room.turnIndex + 1) % 4; } 
+                        while (room.seats[room.turnIndex] === null || room.seats[room.turnIndex].isFolded);
+                    }
                 }
             }
             io.to(socket.roomId).emit('room_update', JSON.stringify(room));
@@ -171,5 +255,5 @@ io.on('connection', (socket) => {
     });
 });
 
-app.get('/', (req, res) => res.send('Neon Domino Advanced Server V2 is Running! 🚀'));
+app.get('/', (req, res) => res.send('Neon Domino Advanced Server V3 is Running! 🚀'));
 server.listen(process.env.PORT || 3000, () => console.log(`SERVER RUNNING`));
