@@ -95,56 +95,66 @@ io.on('connection', (socket) => {
     console.log(`[+] Connected: ${socket.id}`);
 
     socket.on('join_room', (data) => {
-        const { roomId, username } = JSON.parse(data);
-        socket.join(roomId);
-        socket.roomId = roomId;
-        socket.username = username || `Guest_${Math.floor(Math.random()*1000)}`;
-        
-        if (!rooms[roomId]) {
-            rooms[roomId] = { id: roomId, state: 'WAITING', pot: 0, turnIndex: 0, seats: [null, null, null, null], spectators: [] };
-        }
-        
-        // Masuk sebagai penonton dulu
-        rooms[roomId].spectators.push({ id: socket.id, username: socket.username });
-        io.to(roomId).emit('room_update', JSON.stringify(rooms[roomId]));
-        io.to(roomId).emit('game_message', `${socket.username} masuk sebagai penonton.`);
+        try {
+            const { roomId, username } = JSON.parse(data);
+            socket.join(roomId);
+            socket.roomId = roomId;
+            socket.username = username || `Guest_${Math.floor(Math.random()*1000)}`;
+            
+            if (!rooms[roomId]) {
+                rooms[roomId] = { id: roomId, state: 'WAITING', pot: 0, turnIndex: 0, seats: [null, null, null, null], spectators: [] };
+            }
+            
+            // Masuk sebagai penonton dulu
+            rooms[roomId].spectators.push({ id: socket.id, username: socket.username });
+            io.to(roomId).emit('room_update', JSON.stringify(rooms[roomId]));
+        } catch(e) {}
     });
 
     socket.on('sit_down', (data) => {
-        const { seatIndex, chips } = JSON.parse(data);
-        const room = rooms[socket.roomId];
-        if (room && room.seats[seatIndex] === null) {
-            // Hapus dari penonton
-            room.spectators = room.spectators.filter(p => p.id !== socket.id);
-            // Duduk di kursi
-            room.seats[seatIndex] = {
-                id: socket.id,
-                username: socket.username,
-                chips: chips,
-                isBot: false
-            };
-            io.to(socket.roomId).emit('room_update', JSON.stringify(room));
-            io.to(socket.roomId).emit('game_message', `${socket.username} duduk di kursi ${seatIndex + 1}.`);
+        try {
+            const { seatIndex, chips } = JSON.parse(data);
+            const room = rooms[socket.roomId];
+            
+            // Pastikan kursi benar-benar kosong
+            if (room && room.seats[seatIndex] === null) {
+                // Hapus dari penonton
+                room.spectators = room.spectators.filter(p => p.id !== socket.id);
+                // Duduk di kursi
+                room.seats[seatIndex] = {
+                    id: socket.id,
+                    username: socket.username,
+                    chips: chips,
+                    isBot: false
+                };
+                console.log(`Player ${socket.username} sat down at seat ${seatIndex} in room ${room.id}`);
+                io.to(socket.roomId).emit('room_update', JSON.stringify(room));
+                io.to(socket.roomId).emit('game_message', `${socket.username} duduk di meja.`);
+            }
+        } catch(e) {
+            console.error(e);
         }
     });
 
     socket.on('player_action', (data) => {
-        const { action, amount } = JSON.parse(data);
-        const room = rooms[socket.roomId];
-        if (room && room.state === 'PLAYING') {
-            if (action === 'RAISE' || action === 'CALL') room.pot += parseInt(amount || 0);
-            
-            io.to(socket.roomId).emit('action_broadcast', JSON.stringify({
-                username: socket.username,
-                action: action,
-                amount: amount
-            }));
-            
-            // Pindah giliran
-            do { room.turnIndex = (room.turnIndex + 1) % 4; } while (room.seats[room.turnIndex] === null);
-            
-            io.to(socket.roomId).emit('room_update', JSON.stringify(room));
-        }
+        try {
+            const { action, amount } = JSON.parse(data);
+            const room = rooms[socket.roomId];
+            if (room && room.state === 'PLAYING') {
+                if (action === 'RAISE' || action === 'CALL') room.pot += parseInt(amount || 0);
+                
+                io.to(socket.roomId).emit('action_broadcast', JSON.stringify({
+                    username: socket.username,
+                    action: action,
+                    amount: amount
+                }));
+                
+                // Pindah giliran
+                do { room.turnIndex = (room.turnIndex + 1) % 4; } while (room.seats[room.turnIndex] === null);
+                
+                io.to(socket.roomId).emit('room_update', JSON.stringify(room));
+            }
+        } catch(e) {}
     });
 
     socket.on('disconnect', () => {
@@ -153,7 +163,7 @@ io.on('connection', (socket) => {
             room.spectators = room.spectators.filter(p => p.id !== socket.id);
             for (let i = 0; i < 4; i++) {
                 if (room.seats[i] && room.seats[i].id === socket.id) {
-                    room.seats[i] = null; // Kosongkan kursi
+                    room.seats[i] = null; // Kosongkan kursi jika pemain keluar
                 }
             }
             io.to(socket.roomId).emit('room_update', JSON.stringify(room));
